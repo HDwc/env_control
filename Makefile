@@ -11,7 +11,6 @@ $(wildcard gui/guider_fonts/*.c) \
 $(wildcard gui/guider_customer_fonts/*.c) \
 $(shell find lvgl/src -name "*.c") \
 lv_drivers/display/fbdev.c \
-lv_drivers/indev/evdev.c
 
 INC = \
 -I. \
@@ -24,10 +23,9 @@ INC = \
 -Ilvgl \
 -Ilvgl/src \
 -Ilv_drivers \
--Ilv_drivers/display \
--Ilv_drivers/indev
+-Ilv_drivers/display 
 
-CFLAGS = $(INC) -Wall -O2 -DUSE_FBDEV=1 -DUSE_EVDEV=1 -DLV_CONF_INCLUDE_SIMPLE
+CFLAGS = $(INC) -Wall -O2 -DUSE_FBDEV=1
 LDFLAGS = -lm
 
 all:

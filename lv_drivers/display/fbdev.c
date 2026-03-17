@@ -159,6 +159,14 @@ void fbdev_init(void)
 
     LV_LOG_INFO("The framebuffer device was mapped to memory successfully");
 
+    printf("xres=%u yres=%u xres_virtual=%u yres_virtual=%u bpp=%u line_length=%u\n",
+       vinfo.xres, vinfo.yres, vinfo.xres_virtual, vinfo.yres_virtual,
+       vinfo.bits_per_pixel, finfo.line_length);
+
+    printf("red: offset=%u len=%u\n", vinfo.red.offset, vinfo.red.length);
+    printf("green: offset=%u len=%u\n", vinfo.green.offset, vinfo.green.length);
+    printf("blue: offset=%u len=%u\n", vinfo.blue.offset, vinfo.blue.length);
+    printf("transp: offset=%u len=%u\n", vinfo.transp.offset, vinfo.transp.length);
 }
 
 void fbdev_exit(void)
@@ -172,99 +180,65 @@ void fbdev_exit(void)
  * @param area an area where to copy `color_p`
  * @param color_p an array of pixels to copy to the `area` part of the screen
  */
+static inline uint32_t scale_8_to_n(uint8_t v, uint32_t n)
+{
+    if (n >= 8) return ((uint32_t)v) << (n - 8);
+    return ((uint32_t)v) >> (8 - n);
+}
+
 void fbdev_flush(lv_disp_drv_t * drv, const lv_area_t * area, lv_color_t * color_p)
 {
-    if(fbp == NULL ||
-            area->x2 < 0 ||
-            area->y2 < 0 ||
-            area->x1 > (int32_t)vinfo.xres - 1 ||
-            area->y1 > (int32_t)vinfo.yres - 1) {
+    if (fbfd == -1 || fbp == NULL) {
         lv_disp_flush_ready(drv);
         return;
     }
 
-    /*Truncate the area to the screen*/
     int32_t act_x1 = area->x1 < 0 ? 0 : area->x1;
     int32_t act_y1 = area->y1 < 0 ? 0 : area->y1;
     int32_t act_x2 = area->x2 > (int32_t)vinfo.xres - 1 ? (int32_t)vinfo.xres - 1 : area->x2;
     int32_t act_y2 = area->y2 > (int32_t)vinfo.yres - 1 ? (int32_t)vinfo.yres - 1 : area->y2;
 
-
-    lv_coord_t w = (act_x2 - act_x1 + 1);
-    long int location = 0;
-    long int byte_location = 0;
-    unsigned char bit_location = 0;
-
-    /*32 bit per pixel*/
-    if(vinfo.bits_per_pixel == 32) {
-        uint32_t * fbp32 = (uint32_t *)fbp;
-        int32_t y;
-        for(y = act_y1; y <= act_y2; y++) {
-            location = (act_x1 + vinfo.xoffset) + (y + vinfo.yoffset) * finfo.line_length / 4;
-            memcpy(&fbp32[location], (uint32_t *)color_p, (act_x2 - act_x1 + 1) * 4);
-            color_p += w;
-        }
-    }
-    /*24 bit per pixel*/
-    else if(vinfo.bits_per_pixel == 24 && LV_COLOR_DEPTH == 32) {
-        uint8_t * fbp8 = (uint8_t *)fbp;
-        lv_coord_t x;
-        int32_t y;
-        uint8_t *pixel;
-        for(y = act_y1; y <= act_y2; y++) {
-            location = (act_x1 + vinfo.xoffset) + (y + vinfo.yoffset) * finfo.line_length / 3;
-            for (x = 0; x < w; ++x) {
-                pixel = (uint8_t *)(&color_p[x]);
-                fbp8[3 * (location + x)] = pixel[0];
-                fbp8[3 * (location + x) + 1] = pixel[1];
-                fbp8[3 * (location + x) + 2] = pixel[2];
-            }
-            color_p += w;
-        }
-    }
-    /*16 bit per pixel*/
-    else if(vinfo.bits_per_pixel == 16) {
-        uint16_t * fbp16 = (uint16_t *)fbp;
-        int32_t y;
-        for(y = act_y1; y <= act_y2; y++) {
-            location = (act_x1 + vinfo.xoffset) + (y + vinfo.yoffset) * finfo.line_length / 2;
-            memcpy(&fbp16[location], (uint32_t *)color_p, (act_x2 - act_x1 + 1) * 2);
-            color_p += w;
-        }
-    }
-    /*8 bit per pixel*/
-    else if(vinfo.bits_per_pixel == 8) {
-        uint8_t * fbp8 = (uint8_t *)fbp;
-        int32_t y;
-        for(y = act_y1; y <= act_y2; y++) {
-            location = (act_x1 + vinfo.xoffset) + (y + vinfo.yoffset) * finfo.line_length;
-            memcpy(&fbp8[location], (uint32_t *)color_p, (act_x2 - act_x1 + 1));
-            color_p += w;
-        }
-    }
-    /*1 bit per pixel*/
-    else if(vinfo.bits_per_pixel == 1) {
-        uint8_t * fbp8 = (uint8_t *)fbp;
-        int32_t x;
-        int32_t y;
-        for(y = act_y1; y <= act_y2; y++) {
-            for(x = act_x1; x <= act_x2; x++) {
-                location = (x + vinfo.xoffset) + (y + vinfo.yoffset) * vinfo.xres;
-                byte_location = location / 8; /* find the byte we need to change */
-                bit_location = location % 8; /* inside the byte found, find the bit we need to change */
-                fbp8[byte_location] &= ~(((uint8_t)(1)) << bit_location);
-                fbp8[byte_location] |= ((uint8_t)(color_p->full)) << bit_location;
-                color_p++;
-            }
-
-            color_p += area->x2 - act_x2;
-        }
-    } else {
-        /*Not supported bit per pixel*/
+    if (act_x1 > act_x2 || act_y1 > act_y2) {
+        lv_disp_flush_ready(drv);
+        return;
     }
 
-    //May be some direct update command is required
-    //ret = ioctl(state->fd, FBIO_UPDATE, (unsigned long)((uintptr_t)rect));
+    int32_t src_w = area->x2 - area->x1 + 1;
+    int32_t bpp = vinfo.bits_per_pixel / 8;
+
+    for (int32_t y = act_y1; y <= act_y2; y++) {
+        lv_color_t *src = color_p + (y - area->y1) * src_w + (act_x1 - area->x1);
+        uint8_t *dst = fbp + (y + vinfo.yoffset) * finfo.line_length
+                         + (act_x1 + vinfo.xoffset) * bpp;
+
+        for (int32_t x = act_x1; x <= act_x2; x++) {
+#if LV_COLOR_DEPTH == 32
+    uint8_t r = src->ch.red;
+    uint8_t g = src->ch.green;
+    uint8_t b = src->ch.blue;
+
+    uint32_t pixel = 0;
+    pixel |= scale_8_to_n(r, vinfo.red.length)   << vinfo.red.offset;
+    pixel |= scale_8_to_n(g, vinfo.green.length) << vinfo.green.offset;
+    pixel |= scale_8_to_n(b, vinfo.blue.length)  << vinfo.blue.offset;
+
+    if (vinfo.transp.length) {
+        uint32_t a = (1U << vinfo.transp.length) - 1U;
+        pixel |= a << vinfo.transp.offset;
+    }
+
+    if (bpp == 4) {
+        *(uint32_t *)dst = pixel;
+    } else if (bpp == 2) {
+        *(uint16_t *)dst = (uint16_t)pixel;
+    }
+#elif LV_COLOR_DEPTH == 16
+    *(uint16_t *)dst = src->full;
+#endif
+            src++;
+            dst += bpp;
+        }
+    }
 
     lv_disp_flush_ready(drv);
 }

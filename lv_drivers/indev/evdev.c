@@ -172,6 +172,7 @@ void evdev_device_set_calibration(evdev_device_t * dsc, int ver_min, int hor_min
 
 void evdev_read(lv_indev_drv_t * drv, lv_indev_data_t * data)
 {
+    printf("evdev_read called\n");
     evdev_device_t * dsc = drv->user_data ? drv->user_data : &global_dsc;
     if(dsc->fd < 0) return;
 
@@ -181,6 +182,8 @@ void evdev_read(lv_indev_drv_t * drv, lv_indev_data_t * data)
         if(in.type == EV_REL) {
             if(in.code == REL_X) dsc->root_x += in.value;
             else if(in.code == REL_Y) dsc->root_y += in.value;
+            printf("touch: x=%d y=%d state=%d\n",
+                data->point.x, data->point.y, data->state);
         }
         else if(in.type == EV_ABS) {
             if(in.code == ABS_X || in.code == ABS_MT_POSITION_X) dsc->root_x = in.value;

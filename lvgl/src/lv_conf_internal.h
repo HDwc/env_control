@@ -44,6 +44,7 @@
         /* #include will sometimes silently fail when __has_include is used */
         /* https://gcc.gnu.org/bugzilla/show_bug.cgi?id=80753 */
         #pragma message("Possible failure to include lv_conf.h, please read the comment in this file if you get errors")
+        #warning ">>> USING INTERNAL DEFAULT CONFIG <<<"
     #endif
 #endif
 
