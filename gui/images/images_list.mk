@@ -1,1 +1,1 @@
-GEN_CSRCS += 
+GEN_CSRCS += _e_1080x600.c
