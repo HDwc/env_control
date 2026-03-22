@@ -1,0 +1,13 @@
+﻿自定义图片说明（已接入 PNG 运行时加载）
+
+当前已使用以下文件：
+1. icon_title.png  - 顶部标题图标
+2. icon_temp.png   - 温度图标
+3. icon_hum.png    - 湿度图标
+4. icon_fan.png    - 风扇图标
+5. icon_light.png  - 光照图标
+
+说明：
+- 灯光模块不使用图标，只保留开关按钮。
+- 代码通过 POSIX 文件系统 + PNG 解码加载图片，路径前缀为 `S:`。
+- 运行程序时建议在工程根目录启动，保证 `S:gui/images/*.png` 可访问。

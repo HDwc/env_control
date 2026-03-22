@@ -1,1 +1,1 @@
-GEN_CSRCS += _e_1080x600.c
+GEN_CSRCS += _icon_title_alpha_60x50.c _icon_temp_alpha_150x150.c _icon_hum_alpha_150x150.c _icon_fan_alpha_180x180.c _icon_light_alpha_200x180.c

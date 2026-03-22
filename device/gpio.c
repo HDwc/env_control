@@ -8,13 +8,23 @@
 static int write_file(const char *path, const char *value)
 {
     int fd = open(path, O_WRONLY);
+    ssize_t wr;
+    size_t len;
     if (fd < 0)
     {
         perror(path);
         return -1;
     }
 
-    write(fd, value, strlen(value));
+    len = strlen(value);
+    wr = write(fd, value, len);
+    if (wr < 0 || (size_t)wr != len)
+    {
+        perror("write");
+        close(fd);
+        return -1;
+    }
+
     close(fd);
     return 0;
 }
