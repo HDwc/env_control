@@ -5,6 +5,7 @@ TARGET = build/env_control
 SRC = \
 $(wildcard src/*.c) \
 $(wildcard device/*.c) \
+$(wildcard sensor/*.c) \
 $(wildcard gui/*.c) \
 $(wildcard gui/images/*.c) \
 $(wildcard gui/guider_fonts/*.c) \
@@ -15,6 +16,7 @@ lv_drivers/display/fbdev.c \
 INC = \
 -I. \
 -Iinclude \
+-Isensor \
 -Isrc \
 -Igui \
 -Igui/images \

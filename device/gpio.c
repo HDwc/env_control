@@ -3,16 +3,22 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 #include "../include/gpio.h"
 
 static int write_file(const char *path, const char *value)
 {
+    static int open_warned;
+    static int write_warned;
     int fd = open(path, O_WRONLY);
     ssize_t wr;
     size_t len;
     if (fd < 0)
     {
-        perror(path);
+        if (!open_warned) {
+            perror(path);
+            open_warned = 1;
+        }
         return -1;
     }
 
@@ -20,8 +26,13 @@ static int write_file(const char *path, const char *value)
     wr = write(fd, value, len);
     if (wr < 0 || (size_t)wr != len)
     {
-        perror("write");
+        int saved_errno = errno;
+        if (!write_warned) {
+            perror("write");
+            write_warned = 1;
+        }
         close(fd);
+        errno = saved_errno;
         return -1;
     }
 
@@ -32,8 +43,32 @@ static int write_file(const char *path, const char *value)
 int gpio_export(int gpio)
 {
     char buffer[16];
+    int fd;
+    size_t len;
+    ssize_t wr;
+
     sprintf(buffer, "%d", gpio);
-    return write_file("/sys/class/gpio/export", buffer);
+    fd = open("/sys/class/gpio/export", O_WRONLY);
+    if (fd < 0) {
+        perror("/sys/class/gpio/export");
+        return -1;
+    }
+
+    len = strlen(buffer);
+    wr = write(fd, buffer, len);
+    if (wr < 0 || (size_t)wr != len) {
+        int saved_errno = errno;
+        close(fd);
+        if (saved_errno == EBUSY) {
+            return 0;
+        }
+        errno = saved_errno;
+        perror("write");
+        return -1;
+    }
+
+    close(fd);
+    return 0;
 }
 
 int gpio_unexport(int gpio)

@@ -1,0 +1,22 @@
+[Unit]
+Description=Env Control Bootloader
+After=multi-user.target time-sync.target
+Wants=time-sync.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hd/env_control
+ExecStart=/bin/sh /home/hd/env_control/boot/bootloader.sh
+Environment=GUI_START_DELAY=5
+Environment=TIME_SYNC_WAIT_SEC=20
+Environment=RESTART_DELAY_SEC=8
+Environment=PAUSE_FLAG=/tmp/env_control.pause
+Restart=always
+RestartSec=2
+User=root
+Group=root
+StandardOutput=append:/var/log/env_control.log
+StandardError=append:/var/log/env_control.log
+
+[Install]
+WantedBy=multi-user.target

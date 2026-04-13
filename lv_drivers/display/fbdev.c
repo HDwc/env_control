@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <fcntl.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 
@@ -72,9 +73,19 @@ static struct bsd_fb_fix_info finfo;
 static struct fb_var_screeninfo vinfo;
 static struct fb_fix_screeninfo finfo;
 #endif /* USE_BSD_FBDEV */
-static char *fbp = 0;
+static uint8_t *fbp = NULL;
 static long int screensize = 0;
-static int fbfd = 0;
+static int fbfd = -1;
+
+static void fbdev_invalidate(void)
+{
+    if (fbfd >= 0) {
+        close(fbfd);
+    }
+    fbfd = -1;
+    fbp = NULL;
+    screensize = 0;
+}
 
 /**********************
  *      MACROS
@@ -90,6 +101,8 @@ static int fbfd = 0;
 
 void fbdev_init(void)
 {
+    fbdev_invalidate();
+
     // Open the file for reading and writing
     fbfd = open(FBDEV_PATH, O_RDWR);
     if(fbfd == -1) {
@@ -111,12 +124,14 @@ void fbdev_init(void)
     //Get fb type
     if (ioctl(fbfd, FBIOGTYPE, &fb) != 0) {
         perror("ioctl(FBIOGTYPE)");
+        fbdev_invalidate();
         return;
     }
 
     //Get screen width
     if (ioctl(fbfd, FBIO_GETLINEWIDTH, &line_length) != 0) {
         perror("ioctl(FBIO_GETLINEWIDTH)");
+        fbdev_invalidate();
         return;
     }
 
@@ -132,12 +147,14 @@ void fbdev_init(void)
     // Get fixed screen information
     if(ioctl(fbfd, FBIOGET_FSCREENINFO, &finfo) == -1) {
         perror("Error reading fixed information");
+        fbdev_invalidate();
         return;
     }
 
     // Get variable screen information
     if(ioctl(fbfd, FBIOGET_VSCREENINFO, &vinfo) == -1) {
         perror("Error reading variable information");
+        fbdev_invalidate();
         return;
     }
 #endif /* USE_BSD_FBDEV */
@@ -148,14 +165,17 @@ void fbdev_init(void)
     screensize =  finfo.smem_len; //finfo.line_length * vinfo.yres;    
 
     // Map the device to memory
-    fbp = (char *)mmap(0, screensize, PROT_READ | PROT_WRITE, MAP_SHARED, fbfd, 0);
-    if((intptr_t)fbp == -1) {
+    fbp = (uint8_t *)mmap(0, screensize, PROT_READ | PROT_WRITE, MAP_SHARED, fbfd, 0);
+    if (fbp == MAP_FAILED) {
         perror("Error: failed to map framebuffer device to memory");
+        fbdev_invalidate();
         return;
     }
 
-    // Don't initialise the memory to retain what's currently displayed / avoid clearing the screen.
-    // This is important for applications that only draw to a subsection of the full framebuffer.
+    // Clear framebuffer once at startup to avoid stale UI remnants from a previous process.
+    if (screensize > 0) {
+        memset(fbp, 0, (size_t)screensize);
+    }
 
     LV_LOG_INFO("The framebuffer device was mapped to memory successfully");
 
@@ -171,7 +191,10 @@ void fbdev_init(void)
 
 void fbdev_exit(void)
 {
-    close(fbfd);
+    if (fbp && fbp != MAP_FAILED && screensize > 0) {
+        munmap(fbp, (size_t)screensize);
+    }
+    fbdev_invalidate();
 }
 
 /**
@@ -188,7 +211,7 @@ static inline uint32_t scale_8_to_n(uint8_t v, uint32_t n)
 
 void fbdev_flush(lv_disp_drv_t * drv, const lv_area_t * area, lv_color_t * color_p)
 {
-    if (fbfd == -1 || fbp == NULL) {
+    if (fbfd < 0 || fbp == NULL || vinfo.bits_per_pixel <= 0 || finfo.line_length <= 0) {
         lv_disp_flush_ready(drv);
         return;
     }
@@ -205,11 +228,25 @@ void fbdev_flush(lv_disp_drv_t * drv, const lv_area_t * area, lv_color_t * color
 
     int32_t src_w = area->x2 - area->x1 + 1;
     int32_t bpp = vinfo.bits_per_pixel / 8;
+    if (bpp <= 0) {
+        lv_disp_flush_ready(drv);
+        return;
+    }
+
+    uint8_t *fb_begin = (uint8_t *)fbp;
+    uint8_t *fb_end = fb_begin + screensize;
 
     for (int32_t y = act_y1; y <= act_y2; y++) {
         lv_color_t *src = color_p + (y - area->y1) * src_w + (act_x1 - area->x1);
-        uint8_t *dst = fbp + (y + vinfo.yoffset) * finfo.line_length
-                         + (act_x1 + vinfo.xoffset) * bpp;
+        uint8_t *dst = fbp
+                     + (y + vinfo.yoffset) * finfo.line_length
+                     + (act_x1 + vinfo.xoffset) * bpp;
+        size_t line_px = (size_t)(act_x2 - act_x1 + 1);
+        size_t line_bytes = line_px * (size_t)bpp;
+
+        if (dst < fb_begin || (dst + line_bytes) > fb_end) {
+            break;
+        }
 
         for (int32_t x = act_x1; x <= act_x2; x++) {
 #if LV_COLOR_DEPTH == 32

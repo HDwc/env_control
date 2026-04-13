@@ -43,10 +43,6 @@ extern lv_ui guider_ui;
 
 
 void setup_scr_screen(lv_ui *ui);
-
-LV_FONT_DECLARE(lv_font_montserratMedium_16)
-
-
 #ifdef __cplusplus
 }
 #endif
