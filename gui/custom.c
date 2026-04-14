@@ -68,6 +68,7 @@ LV_IMG_DECLARE(_icon_light_alpha_200x180);
 #define SENSOR_SAMPLE_PERIOD_MS 1000
 #define DB_SAVE_INTERVAL_SEC 60
 #define DB_MAX_RECORDS 1440
+#define HIST_VIEW_POINTS 10
 #define SENSOR_LOG_PATH "/tmp/env_sensor_log.csv"
 
 typedef enum {
@@ -158,11 +159,21 @@ typedef struct {
     lv_obj_t *dt_stat;
     lv_obj_t *dt_tip;
     lv_obj_t *dt_log;
+    lv_obj_t *dt_range_1m;
+    lv_obj_t *dt_range_10m;
+    lv_obj_t *dt_range_60m;
     lv_obj_t *dt_slider;
     lv_obj_t *dt_slider_value;
     lv_obj_t *dt_btn_on;
     lv_obj_t *dt_btn_off;
     lv_obj_t *dt_btn_aux;
+    lv_obj_t *dt_th_label;
+    lv_obj_t *dt_th_ta;
+    lv_obj_t *dt_th_edit;
+    lv_obj_t *dt_th_apply;
+    lv_obj_t *dt_num_pad;
+    lv_obj_t *dt_kb;
+    lv_obj_t *dt_kb_ta;
     lv_obj_t *dt_chart;
     lv_chart_series_t *dt_ser;
     lv_obj_t *dt_axis_top;
@@ -222,16 +233,26 @@ static FILE *g_sensor_log_fp;
 static int g_last_raw_temp;
 static int g_last_raw_hum;
 static int g_last_raw_lux;
-static char g_hist_time[HIST_N][9];
+static char g_hist_time[HIST_N][20];
 static db_record_t g_db[DB_MAX_RECORDS];
 static int g_db_head;
 static int g_db_count;
 static time_t g_db_last_save_ts;
+static int g_hist_view_minutes = 10;
+static int g_th_temp_on = 31;
+static int g_th_hum_on = 75;
+static int g_th_lux_low = 120;
 
 static void detail_fill_recent_log(module_t mod);
 static bool lamp_any_on(void);
 static void detail_log_set(const char *text);
 static void btn_set_text(lv_obj_t *btn, const char *text);
+static void ev_hist_range(lv_event_t *e);
+static void ev_threshold_ta(lv_event_t *e);
+static void ev_threshold_apply(lv_event_t *e);
+static void ev_detail_keyboard(lv_event_t *e);
+static void ev_threshold_edit(lv_event_t *e);
+static void ev_num_key(lv_event_t *e);
 
 static int clamp_i(int v, int lo, int hi)
 {
@@ -346,25 +367,30 @@ static void refresh_fan_btn_state(void)
 
 static void auto_update_fan_by_temp(void)
 {
+    int temp_on = g_th_temp_on;
+    int temp_off = clamp_i(g_th_temp_on - 3, -40, 80);
+    int hum_on = g_th_hum_on;
+    int hum_off = clamp_i(g_th_hum_on - 7, 0, 100);
+
     if (g_app.mode == MODE_MANUAL) return;
 
     if (g_app.mode == MODE_ECO) {
         /* Minimum-energy: fan only runs when heat/humidity is clearly high. */
-        if (g_app.temp >= 32 || g_app.hum >= 78) g_app.fan = 1;
-        else if (g_app.temp <= 29 && g_app.hum <= 72) g_app.fan = 0;
+        if (g_app.temp >= temp_on + 1 || g_app.hum >= hum_on + 3) g_app.fan = 1;
+        else if (g_app.temp <= temp_off + 1 && g_app.hum <= hum_off + 3) g_app.fan = 0;
         return;
     }
 
     if (g_app.mode == MODE_NIGHT) {
         /* Night mode prefers quiet operation. */
-        if (g_app.temp >= 33 || g_app.hum >= 80) g_app.fan = 1;
-        else if (g_app.temp <= 30 && g_app.hum <= 74) g_app.fan = 0;
+        if (g_app.temp >= temp_on + 2 || g_app.hum >= hum_on + 5) g_app.fan = 1;
+        else if (g_app.temp <= temp_off + 2 && g_app.hum <= hum_off + 5) g_app.fan = 0;
         return;
     }
 
     /* Auto/Balance mode: coordinated by temperature + humidity + illumination. */
-    if (g_app.temp >= 31 || g_app.hum >= 75) g_app.fan = 1;
-    else if (g_app.temp <= 28 && g_app.hum <= 68 && g_app.lux >= 60) g_app.fan = 0;
+    if (g_app.temp >= temp_on || g_app.hum >= hum_on) g_app.fan = 1;
+    else if (g_app.temp <= temp_off && g_app.hum <= hum_off && g_app.lux >= (g_th_lux_low / 2)) g_app.fan = 0;
 }
 
 static bool lamp_any_on(void)
@@ -381,6 +407,10 @@ static void lamp_set_rgb(bool r, bool g, bool b)
 
 static void auto_update_lamp_by_env(void)
 {
+    int lux_low = g_th_lux_low;
+    int lux_eco = clamp_i(g_th_lux_low - 40, 20, 500);
+    int lux_night = clamp_i(g_th_lux_low + 100, 40, 800);
+
     if (g_app.mode == MODE_MANUAL) return;
 
     bool r = false;
@@ -389,16 +419,16 @@ static void auto_update_lamp_by_env(void)
 
     if (g_app.mode == MODE_ECO) {
         /* ECO uses one channel at low brightness-equivalent behavior. */
-        if (g_app.lux < 80) g = true;
+        if (g_app.lux < lux_eco) g = true;
     } else if (g_app.mode == MODE_NIGHT) {
-        if (g_app.lux < 220) b = true;
+        if (g_app.lux < lux_night) b = true;
     } else {
-        if (g_app.temp >= 31) r = true;
-        if (g_app.hum >= 75) b = true;
-        if (g_app.lux < 120) g = true;
+        if (g_app.temp >= g_th_temp_on) r = true;
+        if (g_app.hum >= g_th_hum_on) b = true;
+        if (g_app.lux < lux_low) g = true;
     }
 
-    if (!r && !g && !b && g_app.lux < 70) g = true;
+    if (!r && !g && !b && g_app.lux < clamp_i(lux_low - 50, 10, 300)) g = true;
     lamp_set_rgb(r, g, b);
 }
 
@@ -501,6 +531,30 @@ static const char *mode_name(app_mode_t m)
     }
 }
 
+static const char *mode_desc_short(app_mode_t m)
+{
+    switch (m) {
+    case MODE_MANUAL: return "手动开关风扇与RGB";
+    case MODE_AUTO: return "温湿光阈值联动";
+    case MODE_ECO: return "低功耗优先";
+    case MODE_NIGHT: return "静音低亮优先";
+    case MODE_DEMO: return "环境均衡策略";
+    default: return "未定义";
+    }
+}
+
+static const char *mode_desc_effect(app_mode_t m)
+{
+    switch (m) {
+    case MODE_MANUAL: return "效果: 按钮操作立即生效，自动策略暂停。";
+    case MODE_AUTO: return "效果: 温/湿/光超过阈值后自动开风扇并调节灯光。";
+    case MODE_ECO: return "效果: 优先关闭风扇，仅在温度明显超阈值时短时运行。";
+    case MODE_NIGHT: return "效果: 风扇尽量保持关闭，仅使用低亮度灯光提示状态。";
+    case MODE_DEMO: return "效果: 结合温度、湿度、光照综合决策，兼顾舒适与功耗。";
+    default: return "效果: 无";
+    }
+}
+
 static const char *fan_level(int speed)
 {
     if (speed <= 0) return "关闭";
@@ -572,6 +626,13 @@ static void show_page(page_t p)
         if (i == p) lv_obj_clear_flag(g_ui.pages[i], LV_OBJ_FLAG_HIDDEN);
         else lv_obj_add_flag(g_ui.pages[i], LV_OBJ_FLAG_HIDDEN);
     }
+    if (g_ui.dt_kb && p != PAGE_DETAIL) {
+        lv_obj_add_flag(g_ui.dt_kb, LV_OBJ_FLAG_HIDDEN);
+        g_ui.dt_kb_ta = NULL;
+    }
+    if (g_ui.dt_num_pad && p != PAGE_DETAIL) {
+        lv_obj_add_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static void apply_hw(void)
@@ -640,7 +701,7 @@ static void refresh_overview(bool with_charts)
         lv_label_set_text(g_ui.ov_temp, b);
     }
     if (g_ui.ov_temp_hint) {
-        snprintf(b, sizeof(b), "阈值:%d°C  峰值:%d°C", FAN_AUTO_ON_TEMP, tmax);
+        snprintf(b, sizeof(b), "阈值:%d°C  峰值:%d°C", g_th_temp_on, tmax);
         lv_label_set_text(g_ui.ov_temp_hint, b);
     }
     if (g_ui.ov_hum) {
@@ -648,7 +709,7 @@ static void refresh_overview(bool with_charts)
         lv_label_set_text(g_ui.ov_hum, b);
     }
     if (g_ui.ov_hum_hint) {
-        snprintf(b, sizeof(b), "阈值:75%%  峰值:%d%%", hmax);
+        snprintf(b, sizeof(b), "阈值:%d%%  峰值:%d%%", g_th_hum_on, hmax);
         lv_label_set_text(g_ui.ov_hum_hint, b);
     }
     if (g_ui.ov_fan) {
@@ -662,7 +723,7 @@ static void refresh_overview(bool with_charts)
         lv_label_set_text(g_ui.ov_lux, b);
     }
     if (g_ui.ov_lux_hint) {
-        snprintf(b, sizeof(b), "阈值:120 LUX  峰值:%d", lmax);
+        snprintf(b, sizeof(b), "阈值:%d LUX  峰值:%d", g_th_lux_low, lmax);
         lv_label_set_text(g_ui.ov_lux_hint, b);
     }
     if (g_ui.ov_lamp) {
@@ -694,8 +755,14 @@ static void refresh_detail(bool with_chart)
     const int *hist = g_app.hist_temp;
     int ymin = 0;
     int ymax = 100;
+    bool editing_th = false;
 
     if (!g_ui.dt_title) return;
+    if (g_ui.dt_th_ta) {
+        editing_th = lv_obj_has_state(g_ui.dt_th_ta, LV_STATE_FOCUSED) ||
+                     (g_ui.dt_kb_ta == g_ui.dt_th_ta) ||
+                     (g_ui.dt_num_pad && !lv_obj_has_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN));
+    }
 
     switch (g_app.detail_mod) {
     case MOD_TEMP:
@@ -704,12 +771,21 @@ static void refresh_detail(bool with_chart)
         lv_label_set_text(g_ui.dt_curr, b);
         snprintf(b, sizeof(b), "当前值:%d°C  原始值:%d°C", g_app.temp, g_last_raw_temp);
         lv_label_set_text(g_ui.dt_stat, b);
-        lv_label_set_text(g_ui.dt_tip, "数据源:AHT20；当前为只读采集，控制功能预留。");
+        lv_label_set_text(g_ui.dt_tip, "AHT20采集，只读");
         lv_obj_add_flag(g_ui.dt_slider, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_slider_value, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_btn_on, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_btn_off, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_btn_aux, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_ui.dt_th_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_ui.dt_th_ta, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_ui.dt_th_edit, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_ui.dt_th_apply, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(g_ui.dt_th_label, "温度阈值(推荐31°C):");
+        if (!editing_th) {
+            snprintf(b, sizeof(b), "%d", g_th_temp_on);
+            lv_textarea_set_text(g_ui.dt_th_ta, b);
+        }
         hist = g_app.hist_temp;
         ymin = 20;
         ymax = 36;
@@ -721,12 +797,21 @@ static void refresh_detail(bool with_chart)
         lv_label_set_text(g_ui.dt_curr, b);
         snprintf(b, sizeof(b), "当前值:%d%%  原始值:%d%%", g_app.hum, g_last_raw_hum);
         lv_label_set_text(g_ui.dt_stat, b);
-        lv_label_set_text(g_ui.dt_tip, "数据源:AHT20；当前为只读采集，控制功能预留。");
+        lv_label_set_text(g_ui.dt_tip, "AHT20采集，只读");
         lv_obj_add_flag(g_ui.dt_slider, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_slider_value, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_btn_on, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_btn_off, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_btn_aux, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_ui.dt_th_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_ui.dt_th_ta, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_ui.dt_th_edit, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_ui.dt_th_apply, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(g_ui.dt_th_label, "湿度阈值(推荐75%):");
+        if (!editing_th) {
+            snprintf(b, sizeof(b), "%d", g_th_hum_on);
+            lv_textarea_set_text(g_ui.dt_th_ta, b);
+        }
         hist = g_app.hist_hum;
         ymin = 35;
         ymax = 80;
@@ -738,12 +823,21 @@ static void refresh_detail(bool with_chart)
         lv_label_set_text(g_ui.dt_curr, b);
         snprintf(b, sizeof(b), "当前值:%d LUX  原始值:%d LUX", g_app.lux, g_last_raw_lux);
         lv_label_set_text(g_ui.dt_stat, b);
-        lv_label_set_text(g_ui.dt_tip, "数据源:BH1750；当前为只读采集，控制功能预留。");
+        lv_label_set_text(g_ui.dt_tip, "BH1750采集，只读");
         lv_obj_add_flag(g_ui.dt_slider, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_slider_value, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_btn_on, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_btn_off, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_btn_aux, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_ui.dt_th_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_ui.dt_th_ta, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_ui.dt_th_edit, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_ui.dt_th_apply, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(g_ui.dt_th_label, "光照阈值(推荐120LUX):");
+        if (!editing_th) {
+            snprintf(b, sizeof(b), "%d", g_th_lux_low);
+            lv_textarea_set_text(g_ui.dt_th_ta, b);
+        }
         hist = g_app.hist_lux;
         ymin = 0;
         ymax = 1000;
@@ -754,13 +848,18 @@ static void refresh_detail(bool with_chart)
         lv_label_set_text(g_ui.dt_curr, g_app.fan > 0 ? "已开启" : "已关闭");
         snprintf(b, sizeof(b), "当前通道:%s", fan_get_channel());
         lv_label_set_text(g_ui.dt_stat, b);
-        lv_label_set_text(g_ui.dt_tip, "仅支持风扇开/关控制；速度调节预留。");
+        lv_label_set_text(g_ui.dt_tip, "支持开关；通道可自动切换");
         detail_fill_recent_log(MOD_FAN);
         lv_obj_add_flag(g_ui.dt_slider, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_slider_value, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(g_ui.dt_btn_on, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(g_ui.dt_btn_off, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_btn_aux, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_ui.dt_th_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_ui.dt_th_ta, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_ui.dt_th_edit, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_ui.dt_th_apply, LV_OBJ_FLAG_HIDDEN);
+        if (g_ui.dt_num_pad) lv_obj_add_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
         btn_set_text(g_ui.dt_btn_on, "风扇开");
         btn_set_text(g_ui.dt_btn_off, "风扇关");
         hist = g_app.hist_temp;
@@ -773,13 +872,18 @@ static void refresh_detail(bool with_chart)
         snprintf(b, sizeof(b), "RGB状态:%s", lamp_state_text());
         lv_label_set_text(g_ui.dt_curr, b);
         lv_label_set_text(g_ui.dt_stat, "红(GPIO117) 绿(GPIO116) 蓝(GPIO109)");
-        lv_label_set_text(g_ui.dt_tip, "手动模式可单独切换；自动模式按环境联动。");
+        lv_label_set_text(g_ui.dt_tip, "手动可单控；自动按环境联动");
         detail_fill_recent_log(MOD_LAMP);
         lv_obj_add_flag(g_ui.dt_slider, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_ui.dt_slider_value, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(g_ui.dt_btn_on, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(g_ui.dt_btn_off, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(g_ui.dt_btn_aux, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_ui.dt_th_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_ui.dt_th_ta, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_ui.dt_th_edit, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_ui.dt_th_apply, LV_OBJ_FLAG_HIDDEN);
+        if (g_ui.dt_num_pad) lv_obj_add_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
         btn_set_text(g_ui.dt_btn_on, "R");
         btn_set_text(g_ui.dt_btn_off, "G");
         btn_set_text(g_ui.dt_btn_aux, "B");
@@ -793,6 +897,12 @@ static void refresh_detail(bool with_chart)
         int v = lv_slider_get_value(g_ui.dt_slider);
         snprintf(b, sizeof(b), "当前设置: %d", v);
         lv_label_set_text(g_ui.dt_slider_value, b);
+    }
+
+    if (g_ui.dt_range_1m && g_ui.dt_range_10m && g_ui.dt_range_60m) {
+        set_bg(g_ui.dt_range_1m, g_hist_view_minutes == 1 ? C_PRIMARY : C_OFF, LV_OPA_COVER);
+        set_bg(g_ui.dt_range_10m, g_hist_view_minutes == 10 ? C_PRIMARY : C_OFF, LV_OPA_COVER);
+        set_bg(g_ui.dt_range_60m, g_hist_view_minutes == 60 ? C_PRIMARY : C_OFF, LV_OPA_COVER);
     }
 
     if (g_ui.dt_axis_top && g_ui.dt_axis_mid && g_ui.dt_axis_bot) {
@@ -815,16 +925,17 @@ static void refresh_mode(void)
 {
     if (!g_ui.mode_current) return;
 
-    char b[64];
+    char b[256];
     snprintf(b, sizeof(b), "当前模式: %s", mode_name(g_app.mode));
     lv_label_set_text(g_ui.mode_current, b);
 
     if (g_ui.mode_info) {
-        snprintf(b, sizeof(b), "风扇通道:%s  历史条目:%d  当前状态:风扇%s/RGB-%s",
+        snprintf(b, sizeof(b), "风扇通道:%s  历史条目:%d  当前状态:风扇%s/RGB-%s\n%s",
                  fan_get_channel(),
                  g_db_count,
                  g_app.fan ? "开" : "关",
-                 lamp_state_text());
+                 lamp_state_text(),
+                 mode_desc_effect(g_app.mode));
         lv_label_set_text(g_ui.mode_info, b);
     }
 
@@ -832,6 +943,7 @@ static void refresh_mode(void)
         if (!g_ui.mode_btns[i]) continue;
         set_bg(g_ui.mode_btns[i], i == g_app.mode ? C_PRIMARY : C_OFF, LV_OPA_COVER);
     }
+
 }
 
 static void refresh_all(void)
@@ -884,6 +996,8 @@ static void btn_set_text(lv_obj_t *btn, const char *text)
 static void ev_nav_overview(lv_event_t *e)
 {
     if (!is_press_event(e)) return;
+    if (g_ui.dt_kb) lv_obj_add_flag(g_ui.dt_kb, LV_OBJ_FLAG_HIDDEN);
+    if (g_ui.dt_num_pad) lv_obj_add_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
     show_page(PAGE_OVERVIEW);
     refresh_all();
 }
@@ -891,6 +1005,8 @@ static void ev_nav_overview(lv_event_t *e)
 static void ev_nav_mode(lv_event_t *e)
 {
     if (!is_press_event(e)) return;
+    if (g_ui.dt_kb) lv_obj_add_flag(g_ui.dt_kb, LV_OBJ_FLAG_HIDDEN);
+    if (g_ui.dt_num_pad) lv_obj_add_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
     show_page(PAGE_MODE);
     refresh_all();
 }
@@ -900,6 +1016,8 @@ static void ev_open_detail(lv_event_t *e)
     if (!is_press_event(e)) return;
     g_app.detail_mod = (module_t)(intptr_t)lv_event_get_user_data(e);
     show_page(PAGE_DETAIL);
+    if (g_ui.dt_kb) lv_obj_add_flag(g_ui.dt_kb, LV_OBJ_FLAG_HIDDEN);
+    if (g_ui.dt_num_pad) lv_obj_add_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
     refresh_all();
 }
 
@@ -913,6 +1031,128 @@ static void ev_slider(lv_event_t *e)
     }
     apply_hw();
     refresh_quick();
+}
+
+static void ev_hist_range(lv_event_t *e)
+{
+    if (!is_press_event(e)) return;
+    int m = (int)(intptr_t)lv_event_get_user_data(e);
+    if (m != 1 && m != 10 && m != 60) return;
+    g_hist_view_minutes = m;
+    refresh_detail(false);
+}
+
+static void ev_threshold_ta(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (!g_ui.dt_th_ta) return;
+
+    if (code == LV_EVENT_FOCUSED ||
+        code == LV_EVENT_CLICKED ||
+        code == LV_EVENT_PRESSED) {
+        g_ui.dt_kb_ta = lv_event_get_target(e);
+        lv_textarea_set_text(g_ui.dt_th_ta, "");
+        if (g_ui.dt_num_pad) {
+            lv_obj_clear_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(g_ui.dt_num_pad);
+            lv_obj_invalidate(g_ui.dt_num_pad);
+        }
+        lv_refr_now(NULL);
+        printf("[gui] threshold input focus, show number pad\n");
+    } else if (code == LV_EVENT_DEFOCUSED) {
+        if (!g_ui.dt_kb_ta && g_ui.dt_num_pad) lv_obj_add_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void ev_threshold_edit(lv_event_t *e)
+{
+    if (!is_press_event(e)) return;
+    if (!g_ui.dt_th_ta) return;
+    g_ui.dt_kb_ta = g_ui.dt_th_ta;
+    lv_obj_add_state(g_ui.dt_th_ta, LV_STATE_FOCUSED);
+    lv_textarea_set_text(g_ui.dt_th_ta, "");
+    if (g_ui.dt_num_pad) {
+        lv_obj_clear_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(g_ui.dt_num_pad);
+        lv_obj_invalidate(g_ui.dt_num_pad);
+    }
+    lv_refr_now(NULL);
+    printf("[gui] threshold edit button pressed, show number pad\n");
+}
+
+static void ev_detail_keyboard(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code != LV_EVENT_READY && code != LV_EVENT_CANCEL) return;
+
+    if (g_ui.dt_kb_ta) {
+        lv_obj_clear_state(g_ui.dt_kb_ta, LV_STATE_FOCUSED);
+    }
+    lv_keyboard_set_textarea(g_ui.dt_kb, NULL);
+    g_ui.dt_kb_ta = NULL;
+    lv_obj_add_flag(g_ui.dt_kb, LV_OBJ_FLAG_HIDDEN);
+    if (g_ui.dt_num_pad) lv_obj_add_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void ev_threshold_apply(lv_event_t *e)
+{
+    if (!is_press_event(e)) return;
+
+    int v;
+    const char *txt;
+    char *endp = NULL;
+    long lv = 0;
+    if (!g_ui.dt_th_ta) return;
+    txt = lv_textarea_get_text(g_ui.dt_th_ta);
+    if (!txt || !txt[0]) return;
+    lv = strtol(txt, &endp, 10);
+    if (endp == txt) return;
+    v = (int)lv;
+
+    if (g_app.detail_mod == MOD_TEMP) {
+        g_th_temp_on = v;
+        printf("[gui] apply temp threshold=%d\n", g_th_temp_on);
+    } else if (g_app.detail_mod == MOD_HUM) {
+        g_th_hum_on = v;
+        printf("[gui] apply hum threshold=%d\n", g_th_hum_on);
+    } else if (g_app.detail_mod == MOD_LIGHT) {
+        g_th_lux_low = v;
+        printf("[gui] apply lux threshold=%d\n", g_th_lux_low);
+    } else {
+        return;
+    }
+
+    if (g_ui.dt_kb) {
+        lv_obj_add_flag(g_ui.dt_kb, LV_OBJ_FLAG_HIDDEN);
+    }
+    g_ui.dt_kb_ta = NULL;
+    lv_obj_clear_state(g_ui.dt_th_ta, LV_STATE_FOCUSED);
+    if (g_ui.dt_num_pad) lv_obj_add_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
+
+    if (g_app.mode != MODE_MANUAL) {
+        auto_update_fan_by_temp();
+        auto_update_lamp_by_env();
+        apply_hw();
+    }
+    refresh_all();
+}
+
+static void ev_num_key(lv_event_t *e)
+{
+    const char *key = (const char *)lv_event_get_user_data(e);
+    if (!is_press_event(e) || !key || !g_ui.dt_th_ta) return;
+
+    if (strcmp(key, "OK") == 0) {
+        if (g_ui.dt_num_pad) lv_obj_add_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_state(g_ui.dt_th_ta, LV_STATE_FOCUSED);
+        g_ui.dt_kb_ta = NULL;
+        return;
+    }
+    if (strcmp(key, "DEL") == 0) {
+        lv_textarea_set_text(g_ui.dt_th_ta, "");
+        return;
+    }
+    lv_textarea_add_text(g_ui.dt_th_ta, key);
 }
 
 static void ev_lamp_toggle(lv_event_t *e)
@@ -1234,8 +1474,8 @@ static void build_detail(lv_obj_t *root)
     lv_coord_t right_w = 376;
     lv_coord_t right_h = CONTENT_H - 68;
     lv_coord_t ctrl_h = 132;
-    lv_coord_t tip_h = 72;
-    lv_coord_t log_y = 216;
+    lv_coord_t tip_h = 30;
+    lv_coord_t log_y = 176;
     lv_coord_t log_h = right_h - log_y;
 
     lv_obj_t *v = lv_obj_create(root);
@@ -1303,19 +1543,62 @@ static void build_detail(lv_obj_t *root)
     lv_obj_t *ct = lv_label_create(ctrl);
     lv_label_set_text(ct, "控制区");
     style_label(ct, C_MAIN);
-    lv_obj_set_pos(ct, 14, 10);
+    lv_obj_set_pos(ct, 14, 8);
+
+    g_ui.dt_th_label = lv_label_create(ctrl);
+    style_label(g_ui.dt_th_label, C_SUB);
+    lv_obj_set_pos(g_ui.dt_th_label, 14, 8);
+    lv_label_set_text(g_ui.dt_th_label, "阈值:");
+
+    g_ui.dt_th_ta = lv_textarea_create(ctrl);
+    lv_obj_set_pos(g_ui.dt_th_ta, 14, 30);
+    lv_obj_set_size(g_ui.dt_th_ta, 150, 34);
+    lv_textarea_set_one_line(g_ui.dt_th_ta, true);
+    lv_obj_add_flag(g_ui.dt_th_ta, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(g_ui.dt_th_ta, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    lv_obj_add_flag(g_ui.dt_th_ta, LV_OBJ_FLAG_ADV_HITTEST);
+    lv_obj_clear_flag(g_ui.dt_th_ta, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(g_ui.dt_th_ta, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(g_ui.dt_th_ta, lv_color_hex(0x0F1F38), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(g_ui.dt_th_ta, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(g_ui.dt_th_ta, lv_color_hex(C_MAIN), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(g_ui.dt_th_ta, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_left(g_ui.dt_th_ta, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(g_ui.dt_th_ta, lv_color_hex(C_MAIN), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(g_ui.dt_th_ta, FONT_UI, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_add_event_cb(g_ui.dt_th_ta, ev_threshold_ta, LV_EVENT_ALL, NULL);
+
+    g_ui.dt_th_edit = lv_btn_create(ctrl);
+    lv_obj_set_pos(g_ui.dt_th_edit, 170, 30);
+    lv_obj_set_size(g_ui.dt_th_edit, 76, 34);
+    style_btn(g_ui.dt_th_edit, C_OFF);
+    lv_obj_add_event_cb(g_ui.dt_th_edit, ev_threshold_edit, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *th_edit_t = lv_label_create(g_ui.dt_th_edit);
+    lv_label_set_text(th_edit_t, "调整");
+    style_label(th_edit_t, C_MAIN);
+    lv_obj_center(th_edit_t);
+
+    g_ui.dt_th_apply = lv_btn_create(ctrl);
+    lv_obj_set_pos(g_ui.dt_th_apply, 252, 30);
+    lv_obj_set_size(g_ui.dt_th_apply, 110, 34);
+    style_btn(g_ui.dt_th_apply, C_PRIMARY);
+    lv_obj_add_event_cb(g_ui.dt_th_apply, ev_threshold_apply, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *th_apply_t = lv_label_create(g_ui.dt_th_apply);
+    lv_label_set_text(th_apply_t, "应用");
+    style_label(th_apply_t, C_MAIN);
+    lv_obj_center(th_apply_t);
 
     g_ui.dt_slider = lv_slider_create(ctrl);
-    lv_obj_set_pos(g_ui.dt_slider, 14, 56);
-    lv_obj_set_size(g_ui.dt_slider, 240, 20);
+    lv_obj_set_pos(g_ui.dt_slider, 14, 74);
+    lv_obj_set_size(g_ui.dt_slider, 228, 16);
     lv_obj_add_event_cb(g_ui.dt_slider, ev_slider, LV_EVENT_VALUE_CHANGED, NULL);
 
     g_ui.dt_slider_value = lv_label_create(ctrl);
     style_label(g_ui.dt_slider_value, C_MAIN);
-    lv_obj_set_pos(g_ui.dt_slider_value, 264, 56);
+    lv_obj_set_pos(g_ui.dt_slider_value, 250, 72);
     g_ui.dt_btn_on = lv_btn_create(ctrl);
-    lv_obj_set_pos(g_ui.dt_btn_on, 14, 86);
-    lv_obj_set_size(g_ui.dt_btn_on, 104, 40);
+    lv_obj_set_pos(g_ui.dt_btn_on, 14, 96);
+    lv_obj_set_size(g_ui.dt_btn_on, 112, 30);
     style_btn(g_ui.dt_btn_on, 0xD64545);
     lv_obj_add_event_cb(g_ui.dt_btn_on, ev_lamp_toggle, LV_EVENT_CLICKED, (void *)(intptr_t)0);
     lv_obj_t *on_t = lv_label_create(g_ui.dt_btn_on);
@@ -1324,8 +1607,8 @@ static void build_detail(lv_obj_t *root)
     lv_obj_center(on_t);
 
     g_ui.dt_btn_off = lv_btn_create(ctrl);
-    lv_obj_set_pos(g_ui.dt_btn_off, 126, 86);
-    lv_obj_set_size(g_ui.dt_btn_off, 104, 40);
+    lv_obj_set_pos(g_ui.dt_btn_off, 132, 96);
+    lv_obj_set_size(g_ui.dt_btn_off, 112, 30);
     style_btn(g_ui.dt_btn_off, 0x2FAF5A);
     lv_obj_add_event_cb(g_ui.dt_btn_off, ev_lamp_toggle, LV_EVENT_CLICKED, (void *)(intptr_t)1);
     lv_obj_t *off_t = lv_label_create(g_ui.dt_btn_off);
@@ -1334,8 +1617,8 @@ static void build_detail(lv_obj_t *root)
     lv_obj_center(off_t);
 
     g_ui.dt_btn_aux = lv_btn_create(ctrl);
-    lv_obj_set_pos(g_ui.dt_btn_aux, 238, 86);
-    lv_obj_set_size(g_ui.dt_btn_aux, 104, 40);
+    lv_obj_set_pos(g_ui.dt_btn_aux, 250, 96);
+    lv_obj_set_size(g_ui.dt_btn_aux, 112, 30);
     style_btn(g_ui.dt_btn_aux, 0x3A74E8);
     lv_obj_add_event_cb(g_ui.dt_btn_aux, ev_lamp_toggle, LV_EVENT_CLICKED, (void *)(intptr_t)2);
     lv_obj_t *aux_t = lv_label_create(g_ui.dt_btn_aux);
@@ -1346,19 +1629,50 @@ static void build_detail(lv_obj_t *root)
     lv_obj_t *tip = mk_card(right, 0, 140, right_w, tip_h);
     g_ui.dt_tip = lv_label_create(tip);
     style_label(g_ui.dt_tip, C_COOL);
-    lv_obj_set_pos(g_ui.dt_tip, 14, 14);
+    lv_obj_set_pos(g_ui.dt_tip, 14, 6);
     lv_obj_set_width(g_ui.dt_tip, right_w - 28);
     lv_label_set_long_mode(g_ui.dt_tip, LV_LABEL_LONG_WRAP);
     lv_label_set_text(g_ui.dt_tip, "说明信息加载中...");
 
     lv_obj_t *log = mk_card(right, 0, log_y, right_w, log_h);
     lv_obj_t *log_t = lv_label_create(log);
-    lv_label_set_text(log_t, "历史数据窗口(最近10条)");
+    lv_label_set_text(log_t, "历史数据");
     style_label(log_t, C_MAIN);
     lv_obj_set_pos(log_t, 14, 8);
+
+    g_ui.dt_range_1m = lv_btn_create(log);
+    lv_obj_set_pos(g_ui.dt_range_1m, right_w - 168, 6);
+    lv_obj_set_size(g_ui.dt_range_1m, 48, 24);
+    style_btn(g_ui.dt_range_1m, C_OFF);
+    lv_obj_add_event_cb(g_ui.dt_range_1m, ev_hist_range, LV_EVENT_CLICKED, (void *)(intptr_t)1);
+    lv_obj_t *r1 = lv_label_create(g_ui.dt_range_1m);
+    lv_label_set_text(r1, "1分");
+    style_label(r1, C_MAIN);
+    lv_obj_center(r1);
+
+    g_ui.dt_range_10m = lv_btn_create(log);
+    lv_obj_set_pos(g_ui.dt_range_10m, right_w - 114, 6);
+    lv_obj_set_size(g_ui.dt_range_10m, 48, 24);
+    style_btn(g_ui.dt_range_10m, C_PRIMARY);
+    lv_obj_add_event_cb(g_ui.dt_range_10m, ev_hist_range, LV_EVENT_CLICKED, (void *)(intptr_t)10);
+    lv_obj_t *r10 = lv_label_create(g_ui.dt_range_10m);
+    lv_label_set_text(r10, "10分");
+    style_label(r10, C_MAIN);
+    lv_obj_center(r10);
+
+    g_ui.dt_range_60m = lv_btn_create(log);
+    lv_obj_set_pos(g_ui.dt_range_60m, right_w - 60, 6);
+    lv_obj_set_size(g_ui.dt_range_60m, 48, 24);
+    style_btn(g_ui.dt_range_60m, C_OFF);
+    lv_obj_add_event_cb(g_ui.dt_range_60m, ev_hist_range, LV_EVENT_CLICKED, (void *)(intptr_t)60);
+    lv_obj_t *r60 = lv_label_create(g_ui.dt_range_60m);
+    lv_label_set_text(r60, "1时");
+    style_label(r60, C_MAIN);
+    lv_obj_center(r60);
+
     g_ui.dt_log = lv_textarea_create(log);
-    lv_obj_set_pos(g_ui.dt_log, 14, 34);
-    lv_obj_set_size(g_ui.dt_log, right_w - 28, log_h - 44);
+    lv_obj_set_pos(g_ui.dt_log, 14, 36);
+    lv_obj_set_size(g_ui.dt_log, right_w - 28, log_h - 46);
     lv_textarea_set_one_line(g_ui.dt_log, false);
     lv_obj_set_style_bg_opa(g_ui.dt_log, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(g_ui.dt_log, lv_color_hex(0x0F1F38), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -1368,18 +1682,42 @@ static void build_detail(lv_obj_t *root)
     lv_obj_set_style_text_font(g_ui.dt_log, FONT_UI, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_textarea_set_text(g_ui.dt_log, "历史数据加载中...\n");
     lv_obj_move_foreground(g_ui.dt_log);
+
+    g_ui.dt_kb = lv_keyboard_create(root);
+    lv_obj_set_size(g_ui.dt_kb, g_w - 24, 160);
+    lv_obj_set_pos(g_ui.dt_kb, 12, g_h - BOTTOM_H - 160);
+    lv_obj_set_style_text_font(g_ui.dt_kb, FONT_UI, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_keyboard_set_mode(g_ui.dt_kb, LV_KEYBOARD_MODE_NUMBER);
+    lv_obj_add_event_cb(g_ui.dt_kb, ev_detail_keyboard, LV_EVENT_ALL, NULL);
+    lv_obj_add_flag(g_ui.dt_kb, LV_OBJ_FLAG_HIDDEN);
+
+    g_ui.dt_num_pad = mk_card(root, g_w - 292, TOP_H + CONTENT_H - 208, 276, 196);
+    lv_obj_set_style_border_width(g_ui.dt_num_pad, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(g_ui.dt_num_pad, lv_color_hex(C_MAIN), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_add_flag(g_ui.dt_num_pad, LV_OBJ_FLAG_HIDDEN);
+
+    {
+        const char *keys[12] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "DEL", "0", "OK"};
+        for (int i = 0; i < 12; ++i) {
+            int col = i % 3;
+            int row = i / 3;
+            lv_obj_t *kb = lv_btn_create(g_ui.dt_num_pad);
+            lv_obj_set_size(kb, 80, 40);
+            lv_obj_set_pos(kb, 10 + col * 86, 12 + row * 46);
+            style_btn(kb, (strcmp(keys[i], "OK") == 0) ? C_PRIMARY : C_OFF);
+            lv_obj_add_event_cb(kb, ev_num_key, LV_EVENT_CLICKED, (void *)keys[i]);
+            lv_obj_t *t = lv_label_create(kb);
+            if (strcmp(keys[i], "DEL") == 0) lv_label_set_text(t, "删除");
+            else if (strcmp(keys[i], "OK") == 0) lv_label_set_text(t, "完成");
+            else lv_label_set_text(t, keys[i]);
+            style_label(t, C_MAIN);
+            lv_obj_center(t);
+        }
+    }
 }
 
 static void build_mode(lv_obj_t *root)
 {
-    static const char *desc[MODE_COUNT] = {
-        "仅手动控制: 风扇开关、RGB颜色",
-        "自动联动: 温湿度控风扇, 光照控RGB",
-        "节能优先: 提高触发阈值, 减少动作次数",
-        "夜间静音: 风扇更保守, 仅蓝光补光",
-        "均衡策略: 温湿光联合决策"
-    };
-
     lv_coord_t list_w = g_w - 32;
     lv_coord_t list_h = CONTENT_H - 68;
 
@@ -1410,19 +1748,16 @@ static void build_mode(lv_obj_t *root)
     lv_obj_set_pos(g_ui.mode_current, 16, 10);
     g_ui.mode_info = lv_label_create(list);
     style_label(g_ui.mode_info, C_SUB);
-    lv_obj_set_pos(g_ui.mode_info, 320, 10);
-    lv_obj_t *mode_tip = lv_label_create(list);
-    lv_label_set_text(mode_tip, "点击下方按钮即可切换模式");
-    style_label(mode_tip, C_SUB);
-    lv_obj_set_pos(mode_tip, 16, 34);
-
+    lv_obj_set_pos(g_ui.mode_info, 16, 34);
+    lv_obj_set_width(g_ui.mode_info, list_w - 32);
+    lv_label_set_long_mode(g_ui.mode_info, LV_LABEL_LONG_WRAP);
     for (int i = 0; i < MODE_COUNT; ++i) {
         int col = i % 2;
         int row = i / 2;
         int bw = (list_w - 48) / 2;
         int bh = 74;
         lv_obj_t *b = lv_btn_create(list);
-        lv_obj_set_pos(b, 16 + col * (bw + 16), 62 + row * (bh + 10));
+        lv_obj_set_pos(b, 16 + col * (bw + 16), 84 + row * (bh + 10));
         lv_obj_set_size(b, bw, bh);
         style_btn(b, i == g_app.mode ? C_PRIMARY : C_OFF);
         lv_obj_set_style_border_width(b, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -1433,14 +1768,17 @@ static void build_mode(lv_obj_t *root)
         lv_obj_t *n = lv_label_create(b);
         lv_label_set_text(n, mode_name((app_mode_t)i));
         style_label(n, C_MAIN);
-        lv_obj_set_pos(n, 14, 6);
+        lv_obj_set_pos(n, 12, 8);
 
         lv_obj_t *d = lv_label_create(b);
-        lv_label_set_text(d, desc[i]);
+        lv_label_set_text(d, mode_desc_short((app_mode_t)i));
         style_label(d, C_SUB);
-        lv_obj_set_pos(d, 14, 28);
+        lv_obj_set_width(d, bw - 24);
+        lv_label_set_long_mode(d, LV_LABEL_LONG_WRAP);
+        lv_obj_set_pos(d, 12, 36);
         lv_obj_move_foreground(b);
     }
+
 }
 
 static void build_bottom(lv_obj_t *root)
@@ -1474,66 +1812,158 @@ static void history_push(int temp, int hum, int lux)
 
     t = time(NULL);
     localtime_r(&t, &tmv);
-    strftime(g_hist_time[HIST_N - 1], sizeof(g_hist_time[HIST_N - 1]), "%H:%M:%S", &tmv);
+    strftime(g_hist_time[HIST_N - 1], sizeof(g_hist_time[HIST_N - 1]), "%m-%d %H:%M:%S", &tmv);
 }
 
 static void detail_fill_recent_log(module_t mod)
 {
-    char buf[768];
+    typedef struct {
+        time_t ts;
+        int temp;
+        int hum;
+        int lux;
+        int fan;
+        int r;
+        int g;
+        int b;
+    } parsed_rec_t;
+
+    char buf[1400];
     size_t used = 0;
-    int n = (g_db_count < 10) ? g_db_count : 10;
+    int shown = 0;
+    time_t interval_sec = (time_t)g_hist_view_minutes * 60;
+    time_t last_pick_ts = 0;
+    int has_last_pick = 0;
 
-    if (n <= 0) {
-        int start = HIST_N - 10;
-        if (start < 0) start = 0;
-        used += (size_t)snprintf(buf + used, sizeof(buf) - used, "数据库暂无记录，显示最近采样缓存:\n");
-        for (int i = start; i < HIST_N && used < sizeof(buf); ++i) {
-            int val = 0;
-            const char *unit = "";
-            if (mod == MOD_TEMP) {
-                val = g_app.hist_temp[i];
-                unit = "°C";
-            } else if (mod == MOD_HUM) {
-                val = g_app.hist_hum[i];
-                unit = "%";
-            } else {
-                val = g_app.hist_lux[i];
-                unit = "LUX";
-            }
-            used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  %d%s\n", g_hist_time[i], val, unit);
-        }
-        detail_log_set(buf);
-        return;
-    }
+    used += (size_t)snprintf(buf + used, sizeof(buf) - used, "最近%d条（每%d分钟1条）:\n",
+                             HIST_VIEW_POINTS, g_hist_view_minutes);
 
-    used += (size_t)snprintf(buf + used, sizeof(buf) - used, "最近%d条数据库记录(1分钟间隔):\n", n);
-    for (int i = 0; i < n && used < sizeof(buf); ++i) {
+    for (int i = 0; i < g_db_count && used < sizeof(buf); ++i) {
         int idx = (g_db_head - 1 - i + DB_MAX_RECORDS) % DB_MAX_RECORDS;
         const db_record_t *rec = &g_db[idx];
         struct tm tmv;
         char tbuf[20];
 
-        localtime_r(&rec->ts, &tmv);
-        strftime(tbuf, sizeof(tbuf), "%H:%M:%S", &tmv);
+        if (has_last_pick && (last_pick_ts - rec->ts) < interval_sec) continue;
 
+        localtime_r(&rec->ts, &tmv);
+        strftime(tbuf, sizeof(tbuf), "%m-%d %H:%M:%S", &tmv);
         if (mod == MOD_TEMP) {
-            used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  %d°C\n", tbuf, rec->temp);
+            used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  温度 %d°C\n", tbuf, rec->temp);
         } else if (mod == MOD_HUM) {
-            used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  %d%%\n", tbuf, rec->hum);
+            used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  湿度 %d%%\n", tbuf, rec->hum);
         } else if (mod == MOD_LIGHT) {
-            used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  %d LUX\n", tbuf, rec->lux);
+            used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  光照 %dLUX\n", tbuf, rec->lux);
         } else if (mod == MOD_FAN) {
-            used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  风扇:%s  模式:%s\n",
-                                     tbuf, rec->fan ? "开启" : "关闭", mode_name(rec->mode));
+            used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  风扇:%s\n", tbuf, rec->fan ? "开启" : "关闭");
         } else {
-            used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  RGB:%d%d%d  模式:%s\n",
+            used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  RGB:%d%d%d\n",
                                      tbuf,
                                      rec->lamp_r_on ? 1 : 0,
                                      rec->lamp_g_on ? 1 : 0,
-                                     rec->lamp_b_on ? 1 : 0,
-                                     mode_name(rec->mode));
+                                     rec->lamp_b_on ? 1 : 0);
+        }
+
+        last_pick_ts = rec->ts;
+        has_last_pick = 1;
+        shown++;
+        if (shown >= HIST_VIEW_POINTS) break;
+    }
+
+    if (shown == 0) {
+        FILE *fp = fopen(SENSOR_LOG_PATH, "r");
+        if (fp) {
+            parsed_rec_t rec_ring[256];
+            int rcnt = 0;
+            int rhead = 0;
+            char line[192];
+
+            while (fgets(line, sizeof(line), fp)) {
+                char ts[20];
+                int t, h, l, fan, r, g, b, mode;
+                int Y, M, D, hh, mm, ss;
+                struct tm tmv;
+                parsed_rec_t rec;
+
+                if (line[0] < '0' || line[0] > '9') continue;
+                if (sscanf(line, "%19[^,],%d,%d,%d,%d,%d,%d,%d,%d",
+                           ts, &t, &h, &l, &fan, &r, &g, &b, &mode) != 9) continue;
+                if (sscanf(ts, "%d-%d-%d %d:%d:%d", &Y, &M, &D, &hh, &mm, &ss) != 6) continue;
+
+                memset(&tmv, 0, sizeof(tmv));
+                tmv.tm_year = Y - 1900;
+                tmv.tm_mon = M - 1;
+                tmv.tm_mday = D;
+                tmv.tm_hour = hh;
+                tmv.tm_min = mm;
+                tmv.tm_sec = ss;
+
+                rec.ts = mktime(&tmv);
+                rec.temp = t;
+                rec.hum = h;
+                rec.lux = l;
+                rec.fan = fan;
+                rec.r = r;
+                rec.g = g;
+                rec.b = b;
+
+                rec_ring[rhead] = rec;
+                rhead = (rhead + 1) % 256;
+                if (rcnt < 256) rcnt++;
+            }
+            fclose(fp);
+
+            for (int i = 0; i < rcnt && used < sizeof(buf); ++i) {
+                int idx = (rhead - 1 - i + 256) % 256;
+                const parsed_rec_t *rec = &rec_ring[idx];
+                struct tm tmv;
+                char tbuf[20];
+
+                if (has_last_pick && (last_pick_ts - rec->ts) < interval_sec) continue;
+
+                localtime_r(&rec->ts, &tmv);
+                strftime(tbuf, sizeof(tbuf), "%m-%d %H:%M:%S", &tmv);
+                if (mod == MOD_TEMP) {
+                    used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  温度 %d°C\n", tbuf, rec->temp);
+                } else if (mod == MOD_HUM) {
+                    used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  湿度 %d%%\n", tbuf, rec->hum);
+                } else if (mod == MOD_LIGHT) {
+                    used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  光照 %dLUX\n", tbuf, rec->lux);
+                } else if (mod == MOD_FAN) {
+                    used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  风扇:%s\n", tbuf, rec->fan ? "开启" : "关闭");
+                } else {
+                    used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  RGB:%d%d%d\n",
+                                             tbuf, rec->r ? 1 : 0, rec->g ? 1 : 0, rec->b ? 1 : 0);
+                }
+
+                last_pick_ts = rec->ts;
+                has_last_pick = 1;
+                shown++;
+                if (shown >= HIST_VIEW_POINTS) break;
+            }
         }
     }
+
+    if (shown == 0) {
+        int start = HIST_N - HIST_VIEW_POINTS;
+        if (start < 0) start = 0;
+        used += (size_t)snprintf(buf + used, sizeof(buf) - used, "暂无分钟级历史，显示最近缓存:\n");
+        for (int i = start; i < HIST_N && used < sizeof(buf); ++i) {
+            int val = 0;
+            const char *unit = "";
+            if (mod == MOD_TEMP) { val = g_app.hist_temp[i]; unit = "°C"; }
+            else if (mod == MOD_HUM) { val = g_app.hist_hum[i]; unit = "%"; }
+            else if (mod == MOD_LIGHT) { val = g_app.hist_lux[i]; unit = "LUX"; }
+            else if (mod == MOD_FAN) { val = g_app.fan; unit = (val ? "(开)" : "(关)"); }
+            else {
+                used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  RGB:%s\n",
+                                         g_hist_time[i], lamp_state_text());
+                continue;
+            }
+            used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s  %d%s\n", g_hist_time[i], val, unit);
+        }
+    }
+
     detail_log_set(buf);
 }
 
@@ -1810,7 +2240,7 @@ int app_hardware_init(void)
     db_reset();
     memset(g_hist_time, 0, sizeof(g_hist_time));
     for (int i = 0; i < HIST_N; ++i) {
-        snprintf(g_hist_time[i], sizeof(g_hist_time[i]), "--:--:--");
+        snprintf(g_hist_time[i], sizeof(g_hist_time[i]), "-- --:--:--");
     }
     g_last_raw_temp = g_app.temp;
     g_last_raw_hum = g_app.hum;

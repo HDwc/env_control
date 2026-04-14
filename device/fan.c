@@ -11,10 +11,11 @@ static const char *g_fan_paths[] = {
 };
 static const char *g_fan_names[] = {"fan0", "fan1"};
 static int g_fan_idx = -1;
+static const int g_fan_count = (int)(sizeof(g_fan_paths) / sizeof(g_fan_paths[0]));
 
 static int fan_detect_channel(void)
 {
-    for (int i = 0; i < (int)(sizeof(g_fan_paths) / sizeof(g_fan_paths[0])); ++i) {
+    for (int i = 0; i < g_fan_count; ++i) {
         if (access(g_fan_paths[i], W_OK) == 0) {
             g_fan_idx = i;
             return 0;
@@ -26,34 +27,52 @@ static int fan_detect_channel(void)
 
 static const char *fan_active_path(void)
 {
-    if (g_fan_idx < 0 || g_fan_idx >= (int)(sizeof(g_fan_paths) / sizeof(g_fan_paths[0]))) return NULL;
+    if (g_fan_idx < 0 || g_fan_idx >= g_fan_count) return NULL;
     return g_fan_paths[g_fan_idx];
+}
+
+static int fan_write_index(int idx, const char *value)
+{
+    int fd;
+    size_t len = strlen(value);
+    ssize_t wr;
+
+    if (idx < 0 || idx >= g_fan_count) return -1;
+    if (access(g_fan_paths[idx], W_OK) != 0) return -1;
+
+    fd = open(g_fan_paths[idx], O_WRONLY);
+    if (fd < 0) return -1;
+
+    wr = write(fd, value, len);
+    close(fd);
+    if (wr < 0 || (size_t)wr != len) return -1;
+
+    return 0;
 }
 
 static int fan_write_value(const char *value)
 {
-    const char *path = fan_active_path();
-    int fd;
-    size_t len;
-    ssize_t wr;
-
-    if (!path) {
-        if (fan_detect_channel() < 0) return -1;
-        path = fan_active_path();
-        if (!path) return -1;
+    int ok = 0;
+    int last_ok = -1;
+    for (int i = 0; i < g_fan_count; ++i) {
+        if (fan_write_index(i, value) == 0) {
+            ok = 1;
+            last_ok = i;
+        }
     }
 
-    fd = open(path, O_WRONLY);
-    if (fd < 0) return -1;
-
-    len = strlen(value);
-    wr = write(fd, value, len);
-    close(fd);
-
-    if (wr < 0 || (size_t)wr != len) {
-        return -1;
+    if (ok) {
+        if (g_fan_idx != last_ok) {
+            g_fan_idx = last_ok;
+            printf("[fan] active channel: %s (broadcast write)\n", g_fan_names[g_fan_idx]);
+        } else {
+            g_fan_idx = last_ok;
+        }
+        return 0;
     }
-    return 0;
+
+    g_fan_idx = -1;
+    return -1;
 }
 
 int fan_init(int gpio)
@@ -81,12 +100,22 @@ int fan_get_state(int gpio)
     char buf[8];
     int fd;
     ssize_t rd;
-    const char *path = fan_active_path();
+    const char *path;
 
     (void)gpio;
-    if (!path) {
+    if (g_fan_idx < 0 || g_fan_idx >= g_fan_count) {
         if (fan_detect_channel() < 0) return -1;
-        path = fan_active_path();
+    }
+
+    path = fan_active_path();
+    if (!path) {
+        for (int i = 0; i < g_fan_count; ++i) {
+            if (access(g_fan_paths[i], R_OK) == 0) {
+                g_fan_idx = i;
+                path = g_fan_paths[i];
+                break;
+            }
+        }
         if (!path) return -1;
     }
 
