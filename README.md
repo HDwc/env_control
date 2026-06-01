@@ -1,137 +1,165 @@
-﻿# 智能环境控制系统（env_control）
+# 智能环境控制系统（env_control）
 
-## 1. 项目定位
-本项目是基于 **LVGL + Linux framebuffer** 的嵌入式智能环境控制系统，目标分辨率 **1024x600**。
+基于 `LVGL + Linux framebuffer` 的嵌入式环境控制项目，目标分辨率 `1024x600`。  
+系统主线是“采集 -> 决策 -> 执行 -> 反馈”。
 
-系统核心能力：
-- 环境感知：AHT20（温湿度）、BH1750（光照）
-- 执行控制：风扇（fan0/fan1）、RGB 灯（GPIO117/116/109）
-- 策略联动：手动/自动/节能/夜间/均衡 5 种模式
-- 可视化：总览、详情、模式管理、历史数据
-- 记录追溯：内存环形历史 + CSV 日志
+## 1. 项目里有什么代码
 
-## 2. “智能”体现在哪里
-1. 感知闭环：固定周期采集真实传感器数据。  
-2. 策略决策：按“模式 + 阈值 + 多传感器条件”计算动作。  
-3. 联动执行：统一执行到风扇和 RGB 硬件。  
-4. 状态反馈：UI + 历史数据可回看策略效果。  
+### 1.1 入口与调度代码
+- `src/main.c`
+  - 负责程序入口。
+  - 调用 `app_hardware_init()` 初始化硬件侧。
+  - 调用 `app_lvgl_port_init()` 初始化显示与输入。
+  - 调用 `setup_ui()/events_init()/custom_init()` 启动 UI 与业务。
+  - 主循环执行 `lv_tick_inc()` + `lv_timer_handler()`。
 
-## 3. 模式与效果
-### 手动模式
-- 人工接管，风扇/RGB 按按钮立即执行。  
-- 自动策略暂停。  
+### 1.2 业务核心代码
+- `gui/custom.c`（核心）
+  - 页面构建：总览页、详情页、模式管理页。
+  - 系统状态：`app_state_t`（温湿光、风扇、RGB、模式、历史）。
+  - 模式策略：`MODE_MANUAL/AUTO/ECO/NIGHT/DEMO`。
+  - 采样与联动：`data_step()`、`auto_update_fan_by_temp()`、`auto_update_lamp_by_env()`。
+  - 硬件落地：`apply_hw()`。
+  - 历史与日志：内存环形记录 `g_db` + `/tmp/env_sensor_log.csv`。
+- `gui/custom.h`
+  - 对外接口：`app_hardware_init`、`app_lvgl_port_init`、`app_lvgl_port_deinit`、`app_get_ms`、`custom_build_screen`、`custom_init`。
 
-### 自动模式
-- 标准联动策略。  
-- 温度/湿度触发风扇，光照/温湿度触发 RGB。  
+### 1.3 GUI 生成层代码（SquareLine/LVGL）
+- `gui/gui_guider.c/.h`：UI 根结构与加载流程。
+- `gui/setup_scr_screen.c`：页面创建入口，调用 `custom_build_screen()`。
+- `gui/events_init.c/.h`：事件初始化骨架。
+- `gui/widgets_init.c/.h`：通用控件初始化辅助。
+- `gui/images/*`：图标资源（PNG 转 C 数组）。
+- `gui/guider_fonts/*`、`gui/guider_customer_fonts/*`：字体资源。
 
-### 节能模式
-- 功耗优先，触发更保守。  
-- 非必要尽量少开风扇，RGB 偏低干预。  
+### 1.4 设备执行层代码
+- `include/board.h`
+  - 板级常量：`FAN_GPIO`、`LAMP_R/G/B_GPIO`、`LAMP_ON/OFF_LEVEL`。
+- `include/gpio.h` + `device/gpio.c`
+  - GPIO 导出、方向设置、读写、反导出。
+- `include/fan.h` + `device/fan.c`
+  - 风扇控制接口。
+  - 兼容 `fan0/fan1` 通道自动探测与写入重试。
+- `include/led.h` + `device/led.c`
+  - LED 兼容控制接口（基于 GPIO）。
 
-### 夜间模式
-- 静音和低打扰优先。  
-- 风扇触发更晚，灯光策略更柔和。  
+### 1.5 传感器采集层代码
+- `sensor/i2c_bus.h/.c`
+  - I2C 总线打开/关闭、读写、写后读。
+- `sensor/aht20.h/.c`
+  - 温湿度初始化与读取，包含 CRC 校验分支。
+- `sensor/bh1750.h/.c`
+  - 光照初始化与读取。
 
-### 均衡模式
-- 舒适与功耗折中。  
-- 响应不激进也不保守。  
+### 1.6 启动与部署代码
+- `boot/bootloader.sh`：拉起主程序，异常退出后重启。
+- `boot/env_control.service`：systemd 服务定义。
+- `boot/install_autostart.sh`：安装开机自启动。
 
-## 4. 模块联动关系
-1. 采集层：AHT20/BH1750 获取环境数据。  
-2. 状态层：更新全局状态（当前值、阈值、模式、历史）。  
-3. 策略层：`auto_update_fan_by_temp()` / `auto_update_lamp_by_env()`。  
-4. 执行层：`apply_hw()` 统一落地到风扇和 GPIO。  
-5. 展示层：刷新总览/详情/模式页和历史窗口。  
+### 1.7 第三方依赖代码
+- `lvgl/`：LVGL 图形库源码。
+- `lv_drivers/`：显示与输入驱动源码（本项目主要使用 framebuffer）。
 
-## 5. RGB 灯应用场景
-RGB 不是装饰，而是状态编码：
-- R：温度偏高提示
-- B：湿度偏高提示
-- G：照度偏低提示
-- 组合色：多条件同时满足
+## 2. 具体功能是什么
 
-价值：无需看数字即可快速判断环境状态，适合巡检和演示。
+### 2.1 环境感知
+- 读取 AHT20：温度/湿度。
+- 读取 BH1750：光照。
+- 采样周期：`1000ms`（见 `SENSOR_SAMPLE_PERIOD_MS`）。
 
-## 6. 风扇与 RGB 的控制机制
-- 传感器模块只提供数据，不直接控制硬件。  
-- 策略模块决定“是否动作”。  
-- `apply_hw()` 统一执行。  
-- 风扇支持 fan0/fan1 兼容控制（避免换线后失控）。  
+### 2.2 设备控制
+- 风扇：开/关控制，支持 `fan0/fan1` 自动兼容。
+- RGB 灯：R/G/B 三通道独立控制。
 
-## 7. 历史数据规则
-- `1分`：最近 10 条，每条间隔 1 分钟  
-- `10分`：最近 10 条，每条间隔 10 分钟  
-- `1时`：最近 10 条，每条间隔 1 小时  
-- 时间显示格式：`MM-DD HH:MM:SS`  
-- 温度单位：`°C`  
+### 2.3 五种运行模式
+- 手动模式：按钮直接控制风扇和 RGB，自动策略暂停。
+- 自动模式：按温湿光阈值联动风扇和灯。
+- 节能模式：触发更保守，减少风扇和灯的介入。
+- 夜间模式：风扇触发更晚、灯光更低打扰。
+- 均衡模式：综合温湿光做折中策略。
 
-## 8. 目录与文件功能（核心自研文件）
-> 注：`lvgl/`、`lv_drivers/` 为第三方框架源码，不在此逐文件展开。
+### 2.4 页面与交互
+- 总览页：实时值、状态摘要、风扇控制、RGB 快捷控制。
+- 详情页：分模块详情、历史窗口、阈值编辑与应用。
+- 模式页：模式切换与效果说明。
 
-### 根目录
-- `Makefile`：项目编译入口。
-- `lv_conf.h`：LVGL 配置。
-- `lv_drv_conf.h`：显示/输入驱动配置。
-- `README.md`：项目总说明（本文件）。
+### 2.5 历史与追踪
+- 短历史：`HIST_N=12` 的内存窗口用于快速趋势显示。
+- 分钟级历史：`g_db` 环形缓冲，最大 `DB_MAX_RECORDS=1440`。
+- 落盘日志：`/tmp/env_sensor_log.csv`，便于重启后回看。
 
-### src/
-- `src/main.c`：程序入口，初始化硬件/LVGL，运行主循环。
+## 3. 运行主流程（从上到下）
 
-### include/
-- `include/board.h`：硬件引脚与板级常量。
-- `include/fan.h`：风扇控制接口声明。
-- `include/gpio.h`：GPIO 抽象接口。
-- `include/led.h`：LED 兼容接口声明。
+1. `main()` 调用 `app_hardware_init()`，初始化 GPIO、风扇、I2C、传感器和日志。  
+2. 调用 `lv_init()` 和 `app_lvgl_port_init()`，准备 framebuffer 与触控输入。  
+3. 调用 `setup_ui()`、`events_init()`、`custom_init()`，建立页面并启动定时器。  
+4. `tmr_data()` 每秒触发：`data_step()` 采样 -> 自动策略 -> `apply_hw()` 执行 -> `refresh_all()` 刷新页面。  
+5. 主循环持续调用 `lv_timer_handler()`，驱动 UI 与业务计时。
 
-### device/
-- `device/fan.c`：风扇控制实现（fan0/fan1 兼容控制、状态读取）。
-- `device/gpio.c`：GPIO 导出、方向设置、读写。
-- `device/led.c`：LED 基础控制（兼容层）。
+## 4. 工程目录结构（自上到下）
 
-### sensor/
-- `sensor/i2c_bus.c/.h`：I2C 总线打开/读写封装。
-- `sensor/aht20.c/.h`：AHT20 温湿度读取。
-- `sensor/bh1750.c/.h`：BH1750 光照读取。
+```text
+env_control/
+├─ src/
+│  └─ main.c
+├─ gui/
+│  ├─ custom.c
+│  ├─ custom.h
+│  ├─ gui_guider.c
+│  ├─ gui_guider.h
+│  ├─ setup_scr_screen.c
+│  ├─ events_init.c
+│  ├─ events_init.h
+│  ├─ widgets_init.c
+│  ├─ widgets_init.h
+│  ├─ images/
+│  ├─ guider_fonts/
+│  └─ guider_customer_fonts/
+├─ sensor/
+│  ├─ i2c_bus.c
+│  ├─ i2c_bus.h
+│  ├─ aht20.c
+│  ├─ aht20.h
+│  ├─ bh1750.c
+│  └─ bh1750.h
+├─ device/
+│  ├─ gpio.c
+│  ├─ fan.c
+│  └─ led.c
+├─ include/
+│  ├─ board.h
+│  ├─ gpio.h
+│  ├─ fan.h
+│  └─ led.h
+├─ boot/
+│  ├─ bootloader.sh
+│  ├─ env_control.service
+│  └─ install_autostart.sh
+├─ lvgl/                 # 第三方库
+├─ lv_drivers/           # 第三方驱动
+├─ docs/
+├─ build/
+├─ Makefile
+├─ lv_conf.h
+├─ lv_drv_conf.h
+└─ README.md
+```
 
-### gui/
-- `gui/custom.c`：核心业务文件（页面构建、事件、模式策略、数据刷新、历史日志）。
-- `gui/custom.h`：`custom.c` 对外接口。
-- `gui/gui_guider.c/.h`：GUI 结构体与页面初始化骨架。
-- `gui/setup_scr_screen.c`：主屏创建入口。
-- `gui/events_init.c/.h`：GUI 事件初始化。
-- `gui/widgets_init.c/.h`：组件初始化（生成代码）。
-- `gui/images/*`：图像资源。
-- `gui/guider_fonts/*`：字体资源。
+## 5. 构建与运行
 
-### boot/
-- `boot/bootloader.sh`：启动主程序并在异常退出后拉起。
-- `boot/env_control.service`：systemd 自启动服务配置。
-- `boot/install_autostart.sh`：一键安装/启用自启动。
-
-### 其它
-- `build/`：编译产物目录。
-
-## 9. 构建与部署
-### 本地构建
+### 5.1 本地构建
 ```bash
 make clean
 make -j4
 ```
 
-### 程序运行（设备端）
+### 5.2 设备端运行
 ```bash
 sudo systemctl stop env_control
 sudo ./build/env_control
 ```
 
-### 代码传输（Windows -> 设备）
-```bash
-scp -r E:/bishe/env_control hd@192.168.8.14:/home/hd/
-```
-
-## 10. 开机自启动
-在目标设备执行：
+### 5.3 开机自启动安装
 ```bash
 cd /home/hd/env_control
 chmod +x boot/bootloader.sh boot/install_autostart.sh
@@ -143,9 +171,3 @@ chmod +x boot/bootloader.sh boot/install_autostart.sh
 systemctl is-enabled env_control.service
 systemctl status env_control.service --no-pager -l
 ```
-
-## 11. 验证建议
-1. 首页观察温湿度/光照实时变化。  
-2. 详情页检查历史数据更新与时间粒度切换。  
-3. 模式管理逐个切换，确认风扇/RGB联动效果。  
-4. 风扇换线后验证控制仍生效。  

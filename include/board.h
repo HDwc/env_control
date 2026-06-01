@@ -5,7 +5,10 @@
 #define LAMP_R_GPIO 117
 #define LAMP_G_GPIO 116
 #define LAMP_B_GPIO 109
+#define BUZZER_GPIO 96
 #define LAMP_ON_LEVEL 1
 #define LAMP_OFF_LEVEL 0
+#define BUZZER_ON_LEVEL 1
+#define BUZZER_OFF_LEVEL 0
 
 #endif
